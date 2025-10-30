@@ -12,6 +12,8 @@ import os
 import math
 import pandas as pd
 import torch
+import evaluate
+import numpy as np
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
@@ -133,6 +135,38 @@ training_args = Seq2SeqTrainingArguments(
 
 data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
+# =======================================================
+# Función de métricas (BLEU + ChrF)
+# =======================================================
+bleu = evaluate.load("sacrebleu")
+chrf = evaluate.load("chrf")
+
+def compute_metrics(eval_pred):
+    preds, labels = eval_pred
+    if isinstance(preds, tuple):
+        preds = preds[0]
+
+    # Decodificar predicciones y etiquetas
+    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+    # Reemplazar tokens de relleno (-100) por el ID de pad antes de decodificar
+    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+    # Limpiar espacios extra
+    decoded_preds = [pred.strip() for pred in decoded_preds]
+    decoded_labels = [label.strip() for label in decoded_labels]
+
+    # Calcular BLEU y ChrF
+    bleu_result = bleu.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
+    chrf_result = chrf.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
+
+    # Devuelve métricas (puedes agregar más)
+    return {
+        "bleu": bleu_result["score"],
+        "chrf": chrf_result["score"],
+        "gen_len": np.mean([len(pred.split()) for pred in decoded_preds]),
+    }
+
 # =====================================================
 # 5) Trainer y start training
 # =====================================================
@@ -143,6 +177,7 @@ trainer = Seq2SeqTrainer(
     eval_dataset=eval_dataset,
     tokenizer=tokenizer,
     data_collator=data_collator,
+    compute_metrics=compute_metrics,
 )
 
 print("Comenzando entrenamiento...")
@@ -155,3 +190,10 @@ print("Guardando modelo y tokenizer...")
 trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 print(f"✅ Modelo guardado en: {OUTPUT_DIR}")
+
+# =====================================================
+# 7) Guardar métricas finales en un archivo
+# =====================================================
+metrics = trainer.evaluate()
+pd.DataFrame([metrics]).to_csv("./training_metrics.csv", index=False)
+print(metrics)
