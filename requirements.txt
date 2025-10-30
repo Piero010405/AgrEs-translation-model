@@ -1,0 +1,7 @@
+transformers
+datasets
+sacrebleu
+sentencepiece
+accelerate
+torch
+pandas
