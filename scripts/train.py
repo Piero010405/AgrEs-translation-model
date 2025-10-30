@@ -66,7 +66,7 @@ model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(device)
 model.gradient_checkpointing_enable()  # ahorra memoria activando checkpointing
 
 # Ajustes de idioma (NLLB utiliza tokens especiales de idioma)
-SRC_LANG = "ajg_Latn"   # revisa si este es el código correcto, ajg_Latn es una suposición
+SRC_LANG = "quz_Latn"  # Quechua, idioma indígena con estructura similar (Lo usaremos como proxy para Awajún)
 TGT_LANG = "spa_Latn"
 
 # Intentamos asignar forced_bos_token_id de forma segura
