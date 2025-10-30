@@ -112,7 +112,7 @@ eval_dataset = tokenized["test"]
 per_device_train_batch_size = 1
 gradient_accumulation_steps = 8
 
-num_epochs = 8
+num_epochs = 6
 learning_rate = 3e-5
 
 training_args = Seq2SeqTrainingArguments(
