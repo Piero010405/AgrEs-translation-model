@@ -1,26 +1,21 @@
-# Usa una imagen base de PyTorch con soporte CUDA
-FROM nvidia/cuda:12.2.0-cudnn8-runtime-ubuntu22.04
-# Evita preguntas durante la instalación
+# Imagen base de PyTorch estable con CUDA 12.1 y cuDNN 8
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Actualiza y instala dependencias básicas
+# Dependencias básicas
 RUN apt-get update && apt-get install -y \
-    python3-pip \
-    git \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+    git wget python3-pip && \
+    rm -rf /var/lib/apt/lists/*
 
-# Establece python3 como predeterminado
-RUN ln -s /usr/bin/python3 /usr/bin/python
+WORKDIR /workspace
 
-# Copia requirements y los instala
+# Requisitos
 COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
-# Crea directorios de trabajo
-WORKDIR /workspace
 
-# Copia scripts y dataset al contenedor
+# Copia scripts y datos
 COPY scripts/ ./scripts/
 COPY data/ ./data/
 

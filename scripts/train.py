@@ -56,6 +56,7 @@ dataset = DatasetDict({
     "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
     "test": Dataset.from_pandas(test_df.reset_index(drop=True))
 })
+print("✅ CSVs cargados.", f"Train rows: {len(train_df)}", f"Test rows: {len(test_df)}", sep="\n")
 
 # =====================================================
 # 2) Tokenizer y modelo
