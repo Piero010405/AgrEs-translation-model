@@ -1,120 +1,113 @@
-# =====================================================
-# 🦜 Fine-tuning NLLB-200 para traducción Awajún → Español
-# Optimizado para GPU RTX con PyTorch + CUDA
-# Adaptado para GPU con ~6GB VRAM (RTX 3050).
-# =====================================================
-
-# -----------------------------
-# 1️⃣ Instalar librerías (ejecuta en terminal si no las tienes)
-# -----------------------------
+# ============================================================
+# Fine-tuning NLLB-200 (versión ligera, robusta frente a NaNs)
+# ============================================================
 
 import os
+import random
 import math
+import time
 import pandas as pd
+import numpy as np
 import torch
 import evaluate
-import numpy as np
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
-    DataCollatorForSeq2Seq
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    set_seed,
 )
 
-# Paths
+# ---------------------------
+# Configs y paths
+# ---------------------------
 TRAIN_CSV = "./data/train.csv"
 TEST_CSV = "./data/test.csv"
-OUTPUT_DIR = "./nllb_awajun_es_finetuned"
-
-# Modelo
+OUTPUT_DIR = "./nllb_awajun_es_finetuned_light"
 MODEL_NAME = "facebook/nllb-200-distilled-600M"
 
-# =====================================================
-# 0) GPU check
-# =====================================================
+# ---------------------------
+# Reproducibilidad y device
+# ---------------------------
+SEED = 42
+set_seed(SEED)
+os.environ["HF_HOME"] = "/workspace/hf_cache"
+os.makedirs("/workspace/hf_cache", exist_ok=True)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
 if torch.cuda.is_available():
-    device_name = torch.cuda.get_device_name(0)
-    print(f"✅ GPU detectada: {device_name}")
-else:
-    print("⚠️ GPU no detectada. Se usará CPU, entrenamiento muy lento.")
-device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("GPU:", torch.cuda.get_device_name(0))
 
-# =====================================================
-# 1) Cargar CSVs
-# =====================================================
+# ---------------------------
+# Cargar datos (espera columnas awajun, spanish)
+# ---------------------------
 print("Cargando CSVs...")
-train_df = pd.read_csv(TRAIN_CSV)
-test_df = pd.read_csv(TEST_CSV)
+train_df = pd.read_csv(TRAIN_CSV).dropna()
+test_df = pd.read_csv(TEST_CSV).dropna()
 
-# asegúrate que las columnas se llamen "awajun" y "spanish"
-train_df = train_df[["awajun", "spanish"]].dropna()
-test_df = test_df[["awajun", "spanish"]].dropna()
+train_df = train_df[["awajun", "spanish"]]
+test_df = test_df[["awajun", "spanish"]]
 
 dataset = DatasetDict({
     "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
     "test": Dataset.from_pandas(test_df.reset_index(drop=True))
 })
-print("✅ CSVs cargados.", f"Train rows: {len(train_df)}", f"Test rows: {len(test_df)}", sep="\n")
+print(f"Train rows: {len(train_df)}, Test rows: {len(test_df)}")
 
-# =====================================================
-# 2) Tokenizer y modelo
-# =====================================================
+# ---------------------------
+# Tokenizer + modelo (ligero y estable)
+# ---------------------------
 print("Cargando tokenizer y modelo...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(device)
-model.gradient_checkpointing_enable()  # ahorra memoria activando checkpointing
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, cache_dir="/workspace/hf_cache")
 
-# Ajustes de idioma (NLLB utiliza tokens especiales de idioma)
-SRC_LANG = "quz_Latn"  # Quechua, idioma indígena con estructura similar (Lo usaremos como proxy para Awajún)
+# Carga clásica (sin device_map auto al principio) para evitar problemas al guardar config
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    MODEL_NAME,
+    cache_dir="/workspace/hf_cache",
+    torch_dtype=torch.bfloat16,  # ✅ más estable y soportado por Ampere (RTX 30xx)
+    device_map="auto"
+)
+
+# Evitar problemas al guardar luego:
+model.config.model_type = getattr(model.config, "model_type", "nllb")
+
+print(f"Modelo cargado. Params: {sum(p.numel() for p in model.parameters())/1e6:.2f} M")
+
+# ---------------------------
+# Tokenización robusta (NLLB)
+# ---------------------------
+MAX_LEN = 96
+SRC_LANG = "quz_Latn"  # proxy para Awajún
 TGT_LANG = "spa_Latn"
-
-# Intentamos asignar forced_bos_token_id de forma segura
-try:
-    # Algunos tokenizers de NLLB exponen lang_code_to_id
-    if hasattr(tokenizer, "lang_code_to_id") and TGT_LANG in tokenizer.lang_code_to_id:
-        model.config.forced_bos_token_id = tokenizer.lang_code_to_id[TGT_LANG]
-    else:
-        # fallback: intenta buscar token literal (poco común)
-        tok = tokenizer.convert_tokens_to_ids(TGT_LANG)
-        if tok:
-            model.config.forced_bos_token_id = tok
-except Exception as e:
-    print("No se pudo establecer forced_bos_token_id de forma automática:", e)
-
-# =====================================================
-# 3) Tokenización
-# =====================================================
-MAX_LEN = 96  # corto para ahorrar memoria; aumentar si tu GPU lo permite
+# Asignar idiomas al tokenizer si aplica:
+setattr(tokenizer, "src_lang", SRC_LANG)
+setattr(tokenizer, "tgt_lang", TGT_LANG)
 
 def tokenize_function(examples):
     inputs = [str(x) for x in examples["awajun"]]
     targets = [str(x) for x in examples["spanish"]]
     model_inputs = tokenizer(inputs, max_length=MAX_LEN, truncation=True, padding="max_length")
-    with tokenizer.as_target_tokenizer():
-        labels = tokenizer(targets, max_length=MAX_LEN, truncation=True, padding="max_length")
+    # use text_target (nuevo API) para las etiquetas
+    labels = tokenizer(text_target=targets, max_length=MAX_LEN, truncation=True, padding="max_length")
     model_inputs["labels"] = labels["input_ids"]
     return model_inputs
 
-print("Tokenizando dataset (esto puede tardar)...")
+print("Tokenizando dataset...")
 tokenized = dataset.map(tokenize_function, batched=True, remove_columns=["awajun", "spanish"])
-
 train_dataset = tokenized["train"]
 eval_dataset = tokenized["test"]
 
-# =====================================================
-# 4) Training params adaptados a 6GB VRAM
-# =====================================================
-# Recomendaciones (elige una combinación):
-# - Opción segura (mínimo VRAM): per_device_train_batch_size=1, gradient_accumulation_steps=8 => eff batch 8
-# - Si tienes un poco más de memoria: per_device_train_batch_size=2, gradient_accumulation_steps=4 => eff 8
-# - Si te arriesgas: per_device_train_batch_size=4, gradient_accumulation_steps=2 => eff 8 (probablemente OOM)
+# ---------------------------
+# Parámetros "ligeros" y robustos para evitar NaNs
+# ---------------------------
 per_device_train_batch_size = 1
-gradient_accumulation_steps = 8
-
-num_epochs = 10
-learning_rate = 3e-5
+gradient_accumulation_steps = 4
+learning_rate = 5e-5
+num_epochs = 4
 
 training_args = Seq2SeqTrainingArguments(
     output_dir=OUTPUT_DIR,
@@ -124,21 +117,26 @@ training_args = Seq2SeqTrainingArguments(
     gradient_accumulation_steps=gradient_accumulation_steps,
     learning_rate=learning_rate,
     weight_decay=0.01,
-    save_total_limit=2,
+    save_total_limit=2, 
     num_train_epochs=num_epochs,
     predict_with_generate=True,
-    fp16=True,  # requiere soporte CUDA; reduce memoria
+    bf16=True,       # ✅ usar BF16
+    fp16=False,      # ❌ no usar FP16
     logging_dir="./logs",
     report_to="none",
     save_strategy="epoch",
     dataloader_num_workers=2,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
 )
 
+# Data collator
 data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
-# =======================================================
-# Función de métricas (BLEU + ChrF)
-# =======================================================
+# ---------------------------
+# Métricas robustas (evitar crash por preds vacías)
+# ---------------------------
 bleu = evaluate.load("sacrebleu")
 chrf = evaluate.load("chrf")
 
@@ -146,31 +144,32 @@ def compute_metrics(eval_pred):
     preds, labels = eval_pred
     if isinstance(preds, tuple):
         preds = preds[0]
-
-    # Decodificar predicciones y etiquetas
+    # Si no hay predicciones (fallo), devolver 0s para evitar NaNs
+    if preds is None or len(preds) == 0:
+        return {"bleu": 0.0, "chrf": 0.0, "gen_len": 0.0}
     decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-    # Reemplazar tokens de relleno (-100) por el ID de pad antes de decodificar
     labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    decoded_preds = [p.strip() for p in decoded_preds]
+    decoded_labels = [l.strip() for l in decoded_labels]
+    # Protegemos la computación en caso de strings vacíos
+    try:
+        bleu_res = bleu.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
+        chrf_res = chrf.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
+        gen_len = np.mean([len(p.split()) for p in decoded_preds]) if len(decoded_preds)>0 else 0.0
+    except Exception as e:
+        print("Warning: compute_metrics failed:", e)
+        return {"bleu": 0.0, "chrf": 0.0, "gen_len": 0.0}
+    return {"bleu": bleu_res["score"], "chrf": chrf_res["score"], "gen_len": gen_len}
 
-    # Limpiar espacios extra
-    decoded_preds = [pred.strip() for pred in decoded_preds]
-    decoded_labels = [label.strip() for label in decoded_labels]
+# ---------------------------
+# Callbacks (early stopping)
+# ---------------------------
+callbacks = [EarlyStoppingCallback(early_stopping_patience=2)]
 
-    # Calcular BLEU y ChrF
-    bleu_result = bleu.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
-    chrf_result = chrf.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
-
-    # Devuelve métricas (puedes agregar más)
-    return {
-        "bleu": bleu_result["score"],
-        "chrf": chrf_result["score"],
-        "gen_len": np.mean([len(pred.split()) for pred in decoded_preds]),
-    }
-
-# =====================================================
-# 5) Trainer y start training
-# =====================================================
+# ---------------------------
+# Trainer
+# ---------------------------
 trainer = Seq2SeqTrainer(
     model=model,
     args=training_args,
@@ -179,22 +178,66 @@ trainer = Seq2SeqTrainer(
     tokenizer=tokenizer,
     data_collator=data_collator,
     compute_metrics=compute_metrics,
+    callbacks=callbacks,
 )
 
-print("Comenzando entrenamiento...")
-trainer.train()
+# ---------------------------
+# Entrenamiento con manejo de errores
+# ---------------------------
+print("Comenzando entrenamiento ligero...")
+try:
+    trainer.train()
+except Exception as e:
+    print("ERROR durante training:", e)
+    # Intentar guardar estado parcial para debugging
+    ckpt_dir = os.path.join(OUTPUT_DIR, "error_checkpoint")
+    print("Guardando checkpoint parcial en:", ckpt_dir)
+    try:
+        trainer.save_model(ckpt_dir)
+        tokenizer.save_pretrained(ckpt_dir)
+        model.config.save_pretrained(ckpt_dir)
+    except Exception as ee:
+        print("Falló al guardar checkpoint parcial:", ee)
+    raise e
+else:
+    # Guardado final y forzar config.json completo
+    trainer.save_model(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    model.config.save_pretrained(OUTPUT_DIR)
+    print("Modelo guardado en", OUTPUT_DIR)
 
-# =====================================================
-# 6) Guardar modelo finetuneado
-# =====================================================
-print("Guardando modelo y tokenizer...")
-trainer.save_model(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
-print(f"✅ Modelo guardado en: {OUTPUT_DIR}")
+# ---------------------------
+# Guardar métricas finales en CSV
+# ---------------------------
+final_metrics = trainer.evaluate()
+pd.DataFrame([final_metrics]).to_csv("./training_metrics.csv", index=False)
+print("Métricas finales:", final_metrics)
 
-# =====================================================
-# 7) Guardar métricas finales en un archivo
-# =====================================================
-metrics = trainer.evaluate()
-pd.DataFrame([metrics]).to_csv("./training_metrics.csv", index=False)
-print(metrics)
+# ---------------------------
+# Función de prueba rápida local (generación de ejemplo)
+# ---------------------------
+def quick_test(sentences, max_new_tokens=64):
+    # Cargar modelo desde OUTPUT_DIR si quieres reusar guardado (opcional)
+    if os.path.isdir(OUTPUT_DIR):
+        m = AutoModelForSeq2SeqLM.from_pretrained(OUTPUT_DIR).to(device)
+        t = AutoTokenizer.from_pretrained(OUTPUT_DIR)
+    else:
+        m = model
+        t = tokenizer
+
+    m.eval()
+    inputs = t(sentences, return_tensors="pt", padding=True, truncation=True).to(device)
+    with torch.no_grad():
+        out = m.generate(**inputs, max_new_tokens=max_new_tokens, num_beams=4)
+    decoded = t.batch_decode(out, skip_special_tokens=True)
+    return decoded
+
+# Ejemplo de uso:
+examples = [
+    "Tukuy maki ... (ejemplo en awajun u otro texto corto que quieras traducir)",
+]
+print("Ejemplo de generación:", quick_test(examples))
+
+# ---------------------------
+# FIN
+# ---------------------------

@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+hf_cache/
+nllb_awajun_es_finetuned_light/
+
 # C extensions
 *.so
 
