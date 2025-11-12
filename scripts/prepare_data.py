@@ -10,7 +10,7 @@ TRAIN = Path("data/train.csv")
 TEST = Path("data/test.csv")
 
 # etiquetas NLLB (ajustadas a los idiomas involucrados)
-TAG_AWAJUN = ">>awb_Latn<<"   # si no existe, puedes definirlo tú
+TAG_AWAJUN = ">>quz_Latn<<" # Usamos la etiqueta de Quechua como proxy para Awajún
 TAG_SPANISH = ">>spa_Latn<<"
 
 # === REGEX LIMPIEZA ===

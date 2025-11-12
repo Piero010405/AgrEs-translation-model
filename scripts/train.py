@@ -49,8 +49,8 @@ print("Cargando CSVs...")
 train_df = pd.read_csv(TRAIN_CSV).dropna()
 test_df = pd.read_csv(TEST_CSV).dropna()
 
-train_df = train_df[["awajun", "spanish"]]
-test_df = test_df[["awajun", "spanish"]]
+train_df = train_df[["src_text", "tgt_text"]]
+test_df = test_df[["src_text", "tgt_text"]]
 
 dataset = DatasetDict({
     "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
@@ -68,36 +68,55 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, cache_dir="/workspace/hf_c
 model = AutoModelForSeq2SeqLM.from_pretrained(
     MODEL_NAME,
     cache_dir="/workspace/hf_cache",
-    torch_dtype=torch.bfloat16,  # ✅ más estable y soportado por Ampere (RTX 30xx)
+    torch_dtype=torch.bfloat16,
     device_map="auto"
 )
 
-# Evitar problemas al guardar luego:
 model.config.model_type = getattr(model.config, "model_type", "nllb")
-
 print(f"Modelo cargado. Params: {sum(p.numel() for p in model.parameters())/1e6:.2f} M")
 
 # ---------------------------
 # Tokenización robusta (NLLB)
 # ---------------------------
+# ---------------------------
+# Tokenización robusta (NLLB) - Bidireccional
+# ---------------------------
 MAX_LEN = 96
-SRC_LANG = "quz_Latn"  # proxy para Awajún
-TGT_LANG = "spa_Latn"
-# Asignar idiomas al tokenizer si aplica:
-setattr(tokenizer, "src_lang", SRC_LANG)
-setattr(tokenizer, "tgt_lang", TGT_LANG)
+
+# Usamos idiomas reconocidos por el modelo
+AWAJUN_LANG = "quz_Latn"  # proxy para Awajún
+SPANISH_LANG = "spa_Latn"
+
+# Asignar valores base (solo para inicialización)
+setattr(tokenizer, "src_lang", AWAJUN_LANG)
+setattr(tokenizer, "tgt_lang", SPANISH_LANG)
 
 def tokenize_function(examples):
-    inputs = [str(x) for x in examples["awajun"]]
-    targets = [str(x) for x in examples["spanish"]]
-    model_inputs = tokenizer(inputs, max_length=MAX_LEN, truncation=True, padding="max_length")
-    # use text_target (nuevo API) para las etiquetas
-    labels = tokenizer(text_target=targets, max_length=MAX_LEN, truncation=True, padding="max_length")
+    inputs = [str(x) for x in examples["src_text"]]
+    targets = [str(x) for x in examples["tgt_text"]]
+    
+    # Tokenizamos directamente los textos, que ya incluyen etiquetas >>xxx_Latn<<
+    model_inputs = tokenizer(
+        inputs,
+        max_length=MAX_LEN,
+        truncation=True,
+        padding="max_length"
+    )
+    labels = tokenizer(
+        text_target=targets,
+        max_length=MAX_LEN,
+        truncation=True,
+        padding="max_length"
+    )
     model_inputs["labels"] = labels["input_ids"]
     return model_inputs
 
 print("Tokenizando dataset...")
-tokenized = dataset.map(tokenize_function, batched=True, remove_columns=["awajun", "spanish"])
+tokenized = dataset.map(
+    tokenize_function,
+    batched=True,
+    remove_columns=["src_text", "tgt_text"]
+)
 train_dataset = tokenized["train"]
 eval_dataset = tokenized["test"]
 
@@ -117,11 +136,11 @@ training_args = Seq2SeqTrainingArguments(
     gradient_accumulation_steps=gradient_accumulation_steps,
     learning_rate=learning_rate,
     weight_decay=0.01,
-    save_total_limit=2, 
+    save_total_limit=2,
     num_train_epochs=num_epochs,
     predict_with_generate=True,
-    bf16=True,       # ✅ usar BF16
-    fp16=False,      # ❌ no usar FP16
+    bf16=True,
+    fp16=False,
     logging_dir="./logs",
     report_to="none",
     save_strategy="epoch",
