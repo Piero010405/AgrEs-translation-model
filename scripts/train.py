@@ -1,11 +1,10 @@
 # ============================================================
-# Fine-tuning NLLB-200
+# Fine-tuning NLLB-200 - Awajún tag personalizada + entrenamiento ligero (awajun_token_train)
 # ============================================================
 
 import os
-import random
-import math
 import time
+import math
 import pandas as pd
 import numpy as np
 import torch
@@ -20,6 +19,8 @@ from transformers import (
     EarlyStoppingCallback,
     set_seed,
 )
+import matplotlib.pyplot as plt
+from datetime import datetime
 
 # ---------------------------
 # Configs y paths
@@ -28,6 +29,12 @@ TRAIN_CSV = "./data/train.csv"
 TEST_CSV = "./data/test.csv"
 OUTPUT_DIR = "./nllb_awajun_es_finetuned_light"
 MODEL_NAME = "facebook/nllb-200-distilled-600M"
+
+# Nombre para métricas/plots
+MODEL_VERSION = "awajun_token_train"
+TIMESTAMP = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+METRICS_DIR = f"./metrics/{MODEL_VERSION}_{TIMESTAMP}"
+os.makedirs(METRICS_DIR, exist_ok=True)
 
 # ---------------------------
 # Reproducibilidad y device
@@ -43,11 +50,16 @@ if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
 
 # ---------------------------
-# Cargar datos (espera columnas awajun, spanish)
+# Cargar datos (espera columnas src_text, tgt_text)
 # ---------------------------
 print("Cargando CSVs...")
 train_df = pd.read_csv(TRAIN_CSV).dropna()
 test_df = pd.read_csv(TEST_CSV).dropna()
+
+# Asegurarnos de columnas correctas
+required_cols = {"src_text", "tgt_text"}
+if not required_cols.issubset(set(train_df.columns)) or not required_cols.issubset(set(test_df.columns)):
+    raise RuntimeError(f"Los CSV deben contener las columnas: {required_cols}. Revisa tus archivos.")
 
 train_df = train_df[["src_text", "tgt_text"]]
 test_df = test_df[["src_text", "tgt_text"]]
@@ -59,16 +71,15 @@ dataset = DatasetDict({
 print(f"Train rows: {len(train_df)}, Test rows: {len(test_df)}")
 
 # ---------------------------
-# Tokenizer + modelo (ligero y estable)
+# Tokenizer + modelo (base)
 # ---------------------------
 print("Cargando tokenizer y modelo...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, cache_dir="/workspace/hf_cache")
 
-# Carga clásica (sin device_map auto al principio) para evitar problemas al guardar config
 model = AutoModelForSeq2SeqLM.from_pretrained(
     MODEL_NAME,
     cache_dir="/workspace/hf_cache",
-    torch_dtype=torch.bfloat16,
+    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
     device_map="auto"
 )
 
@@ -76,34 +87,58 @@ model.config.model_type = getattr(model.config, "model_type", "nllb")
 print(f"Modelo cargado. Params: {sum(p.numel() for p in model.parameters())/1e6:.2f} M")
 
 # ---------------------------
+# Tags personalizados
+# ---------------------------
+# Definimos las etiquetas EXACTAS del dataset generado
+TAG_AWAJUN = ">>agr_Latn<<"   # etiqueta personalizada Awajún
+TAG_SPANISH = ">>spa_Latn<<"
+
+# Añadir como additional special tokens para que no se tokenicen en trozos
+added = []
+for tag in (TAG_AWAJUN, TAG_SPANISH):
+    if tag not in tokenizer.get_vocab():
+        added.append(tag)
+
+if added:
+    print("Añadiendo special tokens al tokenizer:", added)
+    tokenizer.add_special_tokens({"additional_special_tokens": added})
+    # redimensionar embeddings del modelo
+    model.resize_token_embeddings(len(tokenizer))
+else:
+    print("Tags ya presentes en tokenizer vocab.")
+
+# Mostrar ids de las etiquetas
+try:
+    id_agr = tokenizer.convert_tokens_to_ids(TAG_AWAJUN)
+    id_spa = tokenizer.convert_tokens_to_ids(TAG_SPANISH)
+    print(f"✅ Etiqueta {TAG_AWAJUN} id={id_agr}")
+    print(f"✅ Etiqueta {TAG_SPANISH} id={id_spa}")
+except Exception:
+    print("⚠️ No se pudo obtener IDs de tags (revisa tokenizer).")
+
+# ---------------------------
 # Tokenización robusta (NLLB) - Bidireccional
 # ---------------------------
 MAX_LEN = 96
 
-# Usamos idiomas reconocidos por el modelo
-AWAJUN_LANG = "quz_Latn"  # proxy para Awajún
-SPANISH_LANG = "spa_Latn"
-
-# Asignar valores base (solo para inicialización)
-setattr(tokenizer, "src_lang", AWAJUN_LANG)
-setattr(tokenizer, "tgt_lang", SPANISH_LANG)
-
 def tokenize_function(examples):
+    # src_text y tgt_text ya contienen los tags (ej: ">>agr_Latn<< texto...")
     inputs = [str(x) for x in examples["src_text"]]
     targets = [str(x) for x in examples["tgt_text"]]
-    
-    # Tokenizamos directamente los textos, que ya incluyen etiquetas >>xxx_Latn<<
+
     model_inputs = tokenizer(
         inputs,
         max_length=MAX_LEN,
         truncation=True,
-        padding="max_length"
+        padding="max_length",
+        return_tensors=None
     )
     labels = tokenizer(
         text_target=targets,
         max_length=MAX_LEN,
         truncation=True,
-        padding="max_length"
+        padding="max_length",
+        return_tensors=None
     )
     model_inputs["labels"] = labels["input_ids"]
     return model_inputs
@@ -118,12 +153,12 @@ train_dataset = tokenized["train"]
 eval_dataset = tokenized["test"]
 
 # ---------------------------
-# Parámetros "ligeros" y robustos para evitar NaNs
+# Training args (cortos para pruebas)
 # ---------------------------
 per_device_train_batch_size = 1
 gradient_accumulation_steps = 4
 learning_rate = 5e-5
-num_epochs = 4
+num_epochs = 2   # pocas épocas para pruebas
 
 training_args = Seq2SeqTrainingArguments(
     output_dir=OUTPUT_DIR,
@@ -133,10 +168,10 @@ training_args = Seq2SeqTrainingArguments(
     gradient_accumulation_steps=gradient_accumulation_steps,
     learning_rate=learning_rate,
     weight_decay=0.01,
-    save_total_limit=2,
+    save_total_limit=3,
     num_train_epochs=num_epochs,
     predict_with_generate=True,
-    bf16=True,
+    bf16=True if torch.cuda.is_available() else False,  # bf16 en GPU si disponible
     fp16=False,
     logging_dir="./logs",
     report_to="none",
@@ -147,11 +182,13 @@ training_args = Seq2SeqTrainingArguments(
     greater_is_better=False,
 )
 
+# ---------------------------
 # Data collator
+# ---------------------------
 data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
 # ---------------------------
-# Métricas robustas (evitar crash por preds vacías)
+# Métricas
 # ---------------------------
 bleu = evaluate.load("sacrebleu")
 chrf = evaluate.load("chrf")
@@ -160,7 +197,6 @@ def compute_metrics(eval_pred):
     preds, labels = eval_pred
     if isinstance(preds, tuple):
         preds = preds[0]
-    # Si no hay predicciones (fallo), devolver 0s para evitar NaNs
     if preds is None or len(preds) == 0:
         return {"bleu": 0.0, "chrf": 0.0, "gen_len": 0.0}
     decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
@@ -168,13 +204,12 @@ def compute_metrics(eval_pred):
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
     decoded_preds = [p.strip() for p in decoded_preds]
     decoded_labels = [l.strip() for l in decoded_labels]
-    # Protegemos la computación en caso de strings vacíos
     try:
         bleu_res = bleu.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
         chrf_res = chrf.compute(predictions=decoded_preds, references=[[l] for l in decoded_labels])
-        gen_len = np.mean([len(p.split()) for p in decoded_preds]) if len(decoded_preds)>0 else 0.0
+        gen_len = np.mean([len(p.split()) for p in decoded_preds]) if len(decoded_preds) > 0 else 0.0
     except Exception as e:
-        print("Warning: compute_metrics failed:", e)
+        print("Warning compute_metrics failed:", e)
         return {"bleu": 0.0, "chrf": 0.0, "gen_len": 0.0}
     return {"bleu": bleu_res["score"], "chrf": chrf_res["score"], "gen_len": gen_len}
 
@@ -198,36 +233,77 @@ trainer = Seq2SeqTrainer(
 )
 
 # ---------------------------
-# Entrenamiento con manejo de errores
+# Entrenamiento
 # ---------------------------
-print("Comenzando entrenamiento ligero...")
+print("Comenzando entrenamiento (bidireccional, etiquetas personalizadas)...")
 try:
     trainer.train()
 except Exception as e:
     print("ERROR durante training:", e)
-    # Intentar guardar estado parcial para debugging
+    # Guardado parcial
     ckpt_dir = os.path.join(OUTPUT_DIR, "error_checkpoint")
-    print("Guardando checkpoint parcial en:", ckpt_dir)
     try:
         trainer.save_model(ckpt_dir)
         tokenizer.save_pretrained(ckpt_dir)
         model.config.save_pretrained(ckpt_dir)
+        print("Checkpoint parcial guardado en:", ckpt_dir)
     except Exception as ee:
         print("Falló al guardar checkpoint parcial:", ee)
     raise e
 else:
-    # Guardado final y forzar config.json completo
+    # Guardado final
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
     model.config.save_pretrained(OUTPUT_DIR)
     print("Modelo guardado en", OUTPUT_DIR)
 
 # ---------------------------
-# Guardar métricas finales en CSV
+# Guardar métricas en CSV + plots por epoch
 # ---------------------------
-final_metrics = trainer.evaluate()
-pd.DataFrame([final_metrics]).to_csv("./training_metrics.csv", index=False)
-print("Métricas finales:", final_metrics)
+log_hist = trainer.state.log_history
+# extraer solo epoch eval entries
+rows = []
+for entry in log_hist:
+    # entries típicas: {'eval_loss':..., 'eval_bleu':..., 'epoch':1.0, ...}
+    if "epoch" in entry and ("eval_loss" in entry or "loss" in entry):
+        rows.append(entry)
+
+if len(rows) == 0:
+    print("No hay entradas de log para guardar métricas (log_history vacío o no hubo evaluación).")
+else:
+    df_logs = pd.DataFrame(rows)
+    csv_path = os.path.join(METRICS_DIR, "training_metrics_log_history.csv")
+    df_logs.to_csv(csv_path, index=False)
+    print("Saved training log CSV to:", csv_path)
+
+    # Intentar extraer por epoch métricas eval_loss, eval_bleu, eval_chrf
+    # ordenamos por epoch
+    df_epoch = df_logs.sort_values("epoch").reset_index(drop=True)
+
+    # Plots
+    def save_plot(x, y, title, ylabel, fname):
+        plt.figure(figsize=(8,4))
+        plt.plot(x, y, marker="o")
+        plt.title(title)
+        plt.xlabel("epoch")
+        plt.ylabel(ylabel)
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(METRICS_DIR, fname))
+        plt.close()
+
+    epochs = df_epoch["epoch"].tolist()
+    if "eval_loss" in df_epoch.columns:
+        save_plot(epochs, df_epoch["eval_loss"].tolist(), "Eval Loss por Epoch", "Eval Loss", "eval_loss.png")
+    if "eval_bleu" in df_epoch.columns:
+        save_plot(epochs, df_epoch["eval_bleu"].tolist(), "Eval BLEU por Epoch", "BLEU", "eval_bleu.png")
+    if "eval_chrf" in df_epoch.columns:
+        save_plot(epochs, df_epoch["eval_chrf"].tolist(), "Eval ChrF por Epoch", "ChrF", "eval_chrf.png")
+
+    print("Saved plots to:", METRICS_DIR)
+
+print("Entrenamiento completado.")
+
 # ---------------------------
 # FIN
 # ---------------------------
