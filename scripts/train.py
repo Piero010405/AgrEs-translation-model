@@ -1,5 +1,5 @@
 # ============================================================
-# Fine-tuning NLLB-200 (versión ligera, robusta frente a NaNs)
+# Fine-tuning NLLB-200
 # ============================================================
 
 import os
@@ -75,9 +75,6 @@ model = AutoModelForSeq2SeqLM.from_pretrained(
 model.config.model_type = getattr(model.config, "model_type", "nllb")
 print(f"Modelo cargado. Params: {sum(p.numel() for p in model.parameters())/1e6:.2f} M")
 
-# ---------------------------
-# Tokenización robusta (NLLB)
-# ---------------------------
 # ---------------------------
 # Tokenización robusta (NLLB) - Bidireccional
 # ---------------------------
@@ -231,32 +228,6 @@ else:
 final_metrics = trainer.evaluate()
 pd.DataFrame([final_metrics]).to_csv("./training_metrics.csv", index=False)
 print("Métricas finales:", final_metrics)
-
-# ---------------------------
-# Función de prueba rápida local (generación de ejemplo)
-# ---------------------------
-def quick_test(sentences, max_new_tokens=64):
-    # Cargar modelo desde OUTPUT_DIR si quieres reusar guardado (opcional)
-    if os.path.isdir(OUTPUT_DIR):
-        m = AutoModelForSeq2SeqLM.from_pretrained(OUTPUT_DIR).to(device)
-        t = AutoTokenizer.from_pretrained(OUTPUT_DIR)
-    else:
-        m = model
-        t = tokenizer
-
-    m.eval()
-    inputs = t(sentences, return_tensors="pt", padding=True, truncation=True).to(device)
-    with torch.no_grad():
-        out = m.generate(**inputs, max_new_tokens=max_new_tokens, num_beams=4)
-    decoded = t.batch_decode(out, skip_special_tokens=True)
-    return decoded
-
-# Ejemplo de uso:
-examples = [
-    "Tukuy maki ... (ejemplo en awajun u otro texto corto que quieras traducir)",
-]
-print("Ejemplo de generación:", quick_test(examples))
-
 # ---------------------------
 # FIN
 # ---------------------------
