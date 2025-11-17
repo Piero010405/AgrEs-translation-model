@@ -19,7 +19,7 @@ model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(device)
 # ETIQUETAS DE IDIOMA (ajusta si tu dataset usó otras)
 # -------------------------------
 TAG_ES = ">>spa_Latn<<"
-TAG_AW = ">>quz_Latn<<"  # o la que usaste (>>awb_Latn<<, >>awa_Latn<<, etc.)
+TAG_AW = ">>agr_Latn<<"  # o la que usaste (>>awb_Latn<<, >>awa_Latn<<, etc.)
 
 # Validar que existan en el vocabulario
 for tag in [TAG_ES, TAG_AW]:
