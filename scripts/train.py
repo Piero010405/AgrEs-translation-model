@@ -91,30 +91,35 @@ print(f"Modelo cargado. Params: {sum(p.numel() for p in model.parameters())/1e6:
 # ---------------------------
 # Definimos las etiquetas EXACTAS del dataset generado
 TAG_AWAJUN = ">>agr_Latn<<"   # etiqueta personalizada Awajún
-TAG_SPANISH = ">>spa_Latn<<"
+TAG_SPANISH = ">>spa_Latn<<"  # etiqueta español
 
-# Añadir como additional special tokens para que no se tokenicen en trozos
-added = []
-for tag in (TAG_AWAJUN, TAG_SPANISH):
-    if tag not in tokenizer.get_vocab():
-        added.append(tag)
+special_tokens = [TAG_AWAJUN, TAG_SPANISH]
 
-if added:
-    print("Añadiendo special tokens al tokenizer:", added)
-    tokenizer.add_special_tokens({"additional_special_tokens": added})
-    # redimensionar embeddings del modelo
+# Agregar tokens si no están en el vocab
+tokens_to_add = []
+for tok in special_tokens:
+    if tok not in tokenizer.get_vocab():
+        tokens_to_add.append(tok)
+
+if tokens_to_add:
+    print("Añadiendo special tokens al tokenizer:", tokens_to_add)
+    tokenizer.add_special_tokens({"additional_special_tokens": tokens_to_add})
     model.resize_token_embeddings(len(tokenizer))
 else:
     print("Tags ya presentes en tokenizer vocab.")
 
-# Mostrar ids de las etiquetas
-try:
-    id_agr = tokenizer.convert_tokens_to_ids(TAG_AWAJUN)
-    id_spa = tokenizer.convert_tokens_to_ids(TAG_SPANISH)
-    print(f"✅ Etiqueta {TAG_AWAJUN} id={id_agr}")
-    print(f"✅ Etiqueta {TAG_SPANISH} id={id_spa}")
-except Exception:
-    print("⚠️ No se pudo obtener IDs de tags (revisa tokenizer).")
+# Mostrar IDs
+print(f"✅ Etiqueta {TAG_AWAJUN} id={tokenizer.convert_tokens_to_ids(TAG_AWAJUN)}")
+print(f"✅ Etiqueta {TAG_SPANISH} id={tokenizer.convert_tokens_to_ids(TAG_SPANISH)}")
+
+# ---------------------------
+# FIX DEL BUG DE NLLB:
+# ---------------------------------------------------
+# Obligatorio establecer src_lang y tgt_lang ANTES de tokenizar
+# De lo contrario prefix_tokens queda como None → ERROR
+# ---------------------------------------------------
+tokenizer.src_lang = "agr_Latn"
+tokenizer.tgt_lang = "spa_Latn"
 
 # ---------------------------
 # Tokenización robusta (NLLB) - Bidireccional
@@ -122,35 +127,47 @@ except Exception:
 MAX_LEN = 96
 
 def tokenize_function(examples):
-    # src_text y tgt_text ya contienen los tags (ej: ">>agr_Latn<< texto...")
-    inputs = [str(x) for x in examples["src_text"]]
+
+    inputs  = [str(x) for x in examples["src_text"]]  # ya vienen con tags
     targets = [str(x) for x in examples["tgt_text"]]
 
+    # ------------------------
+    # Encoding fuente
+    # ------------------------
     model_inputs = tokenizer(
         inputs,
         max_length=MAX_LEN,
         truncation=True,
         padding="max_length",
-        return_tensors=None
     )
-    labels = tokenizer(
-        text_target=targets,
-        max_length=MAX_LEN,
-        truncation=True,
-        padding="max_length",
-        return_tensors=None
-    )
+
+    # ------------------------
+    # Encoding objetivo
+    # IMPORTANTE:
+    # No usar text_target= (bug de NLLB → NoneType error)
+    # ------------------------
+    with tokenizer.as_target_tokenizer():
+        labels = tokenizer(
+            targets,
+            max_length=MAX_LEN,
+            truncation=True,
+            padding="max_length",
+        )
+
     model_inputs["labels"] = labels["input_ids"]
     return model_inputs
 
 print("Tokenizando dataset...")
+
 tokenized = dataset.map(
     tokenize_function,
     batched=True,
     remove_columns=["src_text", "tgt_text"]
 )
+
 train_dataset = tokenized["train"]
-eval_dataset = tokenized["test"]
+eval_dataset  = tokenized["test"]
+print("Tokenización completada.")
 
 # ---------------------------
 # Training args (cortos para pruebas)
