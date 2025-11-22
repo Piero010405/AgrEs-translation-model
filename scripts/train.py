@@ -4,6 +4,8 @@ Decoder_input_ids creados directamente en el dataset
 """
 
 import os
+from datetime import datetime
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import torch
@@ -18,8 +20,6 @@ from transformers import (
     set_seed,
 )
 import matplotlib.pyplot as plt
-from datetime import datetime
-from pathlib import Path
 
 # ============================================================
 # CONFIGURACIÓN
@@ -47,7 +47,7 @@ os.makedirs("/workspace/hf_cache", exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("=" * 70)
-print("🚀 NLLB-200 FINE-TUNING AWAJÚN-ESPAÑOL - SOLUCIÓN DEFINITIVA (CORREGIDO) PIPOOOOO")
+print("🚀 NLLB-200 FINE-TUNING AWAJÚN-ESPAÑOL - DATA LAB MODEL")
 print("=" * 70)
 print(f"Device: {device}")
 if torch.cuda.is_available():
@@ -105,7 +105,7 @@ if tokens_to_add:
     print(f"   Agregando: {tokens_to_add}")
     tokenizer.add_special_tokens({"additional_special_tokens": tokens_to_add})
     model.resize_token_embeddings(len(tokenizer))
-    
+
     # Inicialización desde otro token (opcional), con manejo de errores
     try:
         proxy_token_id = tokenizer.convert_tokens_to_ids("quy_Latn")
@@ -193,22 +193,22 @@ def preprocess_with_decoder_inputs(examples):
     attention_mask = []
     labels = []
     decoder_input_ids = []
-    
+
     batch_size = len(examples["src_text"])
     # prepare directions list if present
     directions = examples.get("direction", [None] * batch_size)
-    
+
     for i in range(batch_size):
         src_text = str(examples["src_text"][i])
         tgt_text = str(examples["tgt_text"][i])
         dir_val = directions[i] if i < len(directions) else None
-        
+
         # infer source and target language tags for the tokenizer (NLLB fast tokenizer needs these)
         src_lang, tgt_lang = _infer_langs_from_direction(dir_val)
         # set tokenizer attributes for current tokenization
         tokenizer.src_lang = src_lang
         tokenizer.tgt_lang = tgt_lang
-        
+
         # Tokenizar entrada
         src_encoded = tokenizer(
             src_text,
@@ -216,7 +216,7 @@ def preprocess_with_decoder_inputs(examples):
             truncation=True,
             padding=False,
         )
-        
+
         # Tokenizar salida con text_target (asegura que prefix tokens estén bien)
         tgt_encoded = tokenizer(
             text_target=tgt_text,
@@ -224,7 +224,7 @@ def preprocess_with_decoder_inputs(examples):
             truncation=True,
             padding=False,
         )
-        
+
         label_ids = tgt_encoded["input_ids"]
         # shift right: decoder_input_ids = [decoder_start] + labels[:-1]
         decoder_start_token_id = model.config.decoder_start_token_id
@@ -234,7 +234,7 @@ def preprocess_with_decoder_inputs(examples):
             # avoid empty target
             label_ids = [tokenizer.pad_token_id]
         decoder_ids = [decoder_start_token_id] + label_ids[:-1] if len(label_ids) > 0 else [decoder_start_token_id]
-        
+
         input_ids.append(src_encoded["input_ids"])
         attention_mask.append(src_encoded.get("attention_mask", [1]*len(src_encoded["input_ids"])))
         labels.append(label_ids)
@@ -287,40 +287,40 @@ class Seq2SeqDataCollatorWithPadding:
     def __init__(self, tokenizer, pad_to_multiple_of=None):
         self.tokenizer = tokenizer
         self.pad_to_multiple_of = pad_to_multiple_of
-    
+
     def __call__(self, features):
         input_ids = [f["input_ids"] for f in features]
         attention_mask = [f["attention_mask"] for f in features]
         labels = [f["labels"] for f in features]
         decoder_input_ids = [f["decoder_input_ids"] for f in features]
-        
+
         max_input_len = max(len(ids) for ids in input_ids)
         max_label_len = max(len(lbl) for lbl in labels)
         max_decoder_len = max(len(dec) for dec in decoder_input_ids)
-        
+
         if self.pad_to_multiple_of:
             def _pad_to(n): return ((n + self.pad_to_multiple_of - 1) // self.pad_to_multiple_of) * self.pad_to_multiple_of
             max_input_len = _pad_to(max_input_len)
             max_label_len = _pad_to(max_label_len)
             max_decoder_len = _pad_to(max_decoder_len)
-        
+
         padded_input_ids = []
         padded_attention_mask = []
         for ids, mask in zip(input_ids, attention_mask):
             padding_len = max_input_len - len(ids)
             padded_input_ids.append(ids + [self.tokenizer.pad_token_id] * padding_len)
             padded_attention_mask.append(mask + [0] * padding_len)
-        
+
         padded_labels = []
         for lbl in labels:
             padding_len = max_label_len - len(lbl)
             padded_labels.append(lbl + [-100] * padding_len)
-        
+
         padded_decoder_ids = []
         for dec in decoder_input_ids:
             padding_len = max_decoder_len - len(dec)
             padded_decoder_ids.append(dec + [self.tokenizer.pad_token_id] * padding_len)
-        
+
         batch = {
             "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(padded_attention_mask, dtype=torch.long),
@@ -470,18 +470,18 @@ try:
     print(f"   BLEU: {baseline_metrics.get('eval_bleu', 0):.2f}")
     print(f"   ChrF: {baseline_metrics.get('eval_chrf', 0):.2f}")
     print(f"   TER:  {baseline_metrics.get('eval_ter', 100):.2f}")
-    
+
     # Entrenar
     print("\n🏃 Entrenando modelo...")
     train_result = trainer.train()
-    
+
     # Guardar
     print("\n💾 Guardando modelo final...")
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
     model.config.save_pretrained(OUTPUT_DIR)
     print(f"   ✅ Modelo guardado en: {OUTPUT_DIR}")
-    
+
     # Métricas finales
     final_metrics = trainer.evaluate()
     print("\n" + "=" * 70)
@@ -491,12 +491,12 @@ try:
     print(f"   ChrF: {final_metrics.get('eval_chrf', 0):.2f}")
     print(f"   TER:  {final_metrics.get('eval_ter', 100):.2f}")
     print(f"   Loss: {final_metrics.get('eval_loss', 0):.4f}")
-    
+
 except Exception as e:
     print(f"\n❌ ERROR DURANTE ENTRENAMIENTO: {e}")
     import traceback
     traceback.print_exc()
-    
+
     emergency_dir = os.path.join(OUTPUT_DIR, "emergency_checkpoint")
     try:
         trainer.save_model(emergency_dir)
@@ -504,7 +504,7 @@ except Exception as e:
         print(f"   💾 Checkpoint de emergencia guardado en: {emergency_dir}")
     except Exception as ee:
         print(f"   ❌ No se pudo guardar checkpoint: {ee}")
-    
+
     raise
 
 # ============================================================
@@ -539,9 +539,9 @@ for src_text, src_lang, tgt_lang, description in test_cases:
     # set tokenizer lang tags for generation
     tokenizer.src_lang = src_lang
     tokenizer.tgt_lang = tgt_lang
-    
+
     inputs = tokenizer(src_text, return_tensors="pt").to(device)
-    
+
     # forced_bos_token_id must be the ID of the language TOKEN (e.g. >>spa_Latn<<), not the string 'spa_Latn'
     forced_bos = None
     if tgt_lang == LANG_SPANISH:
@@ -557,7 +557,7 @@ for src_text, src_lang, tgt_lang, description in test_cases:
             num_beams=4,
             early_stopping=True
         )
-    
+
     translation = tokenizer.decode(outputs[0], skip_special_tokens=True)
     direction = "→" if src_lang == LANG_AWAJUN else "←"
     print(f"\n   {direction} {src_text}")
@@ -567,6 +567,6 @@ for src_text, src_lang, tgt_lang, description in test_cases:
 print("\n" + "=" * 70)
 print("✅ PROCESO COMPLETADO EXITOSAMENTE")
 print("=" * 70)
-print(f"\n📁 Archivos generados:")
+print("\n📁 Archivos generados:")
 print(f"   - Modelo final: {OUTPUT_DIR}")
 print(f"   - Métricas: {METRICS_DIR}")
