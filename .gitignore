@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+nllb_awajun_es_finetuned_v2/
 hf_cache/
 nllb_awajun_es_finetuned_light/
 
