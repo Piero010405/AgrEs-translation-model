@@ -6,7 +6,8 @@ import sys
 # CONFIGURACIÓN INICIAL
 # -------------------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model_path = "./nllb_awajun_es_finetuned_light"
+model_path = r"./nllb_awajun_es_finetuned_v2"
+
 
 print(f"\n📦 Cargando modelo desde: {model_path}")
 print(f"💻 Dispositivo activo: {device.upper()}")
